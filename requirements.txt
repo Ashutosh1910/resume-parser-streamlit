@@ -3,3 +3,4 @@ google-generativeai
 python-dotenv
 pdfminer.six
 pandas
+python-docx

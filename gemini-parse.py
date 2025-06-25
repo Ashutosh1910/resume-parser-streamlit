@@ -7,15 +7,26 @@ import pandas as pd
 import google.generativeai as genai
 from dotenv import load_dotenv
 from pdfminer.high_level import extract_text
-
-# --- Directory and Database Setup ---
-
-# Create the directory for storing resumes if it doesn't exist
+import docx
+import re
 UPLOAD_DIR = 'uploaded_resumes'
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+def get_phone(text):
+    phone_regex = re.compile(r'''
+        (?:(?:\+?\d{1,3}[\s\-]?)?(?:\(?\d{3,5}\)?[\s\-]?)?)? 
+        \d{3,5}[\s\-]?\d{3,5}(?:[\s\-]?\d{3,5})?              
+    ''', re.VERBOSE)
 
+    matches = phone_regex.findall(text)
+    for match in matches:
+        digits = re.sub(r'\D', '', match)
+        if 10 <= len(digits) <= 13:
+            return match.strip()
+    return None
+def get_email(text):
+    match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', text)
+    return match.group(0) if match else None
 def init_db():
-    """Initializes the SQLite database and creates the 'resumes' table."""
     conn = sqlite3.connect('resume_data.db')
     c = conn.cursor()
     # Updated schema to include name, email, and the path to the saved file
@@ -34,7 +45,6 @@ def init_db():
     conn.close()
 
 def add_resume_to_db(filename, parsed_data, file_bytes):
-    """Saves the parsed data and the original file, then adds a record to the database."""
     conn = sqlite3.connect('resume_data.db')
     c = conn.cursor()
 
@@ -43,15 +53,13 @@ def add_resume_to_db(filename, parsed_data, file_bytes):
     person_email = parsed_data.get('personal_info', {}).get('email', 'N/A')
     json_string = json.dumps(parsed_data)
 
-    # Insert a preliminary record to get the ID
     c.execute(
         "INSERT INTO resumes (filename, name, email, parsed_json) VALUES (?, ?, ?, ?)",
         (filename, person_name, person_email, json_string)
     )
-    resume_id = c.lastrowid # Get the ID of the new row
+    resume_id = c.lastrowid
 
-    # Create a unique path for the saved file using the database ID
-    saved_filepath = os.path.join(UPLOAD_DIR, f"resume_{resume_id}.pdf")
+    saved_filepath = os.path.join(UPLOAD_DIR, f"resume_{resume_id}.pdf" if filename.endswith('.pdf') else 'resume_{resume_id}.docx')
 
     # Save the actual file
     with open(saved_filepath, 'wb') as f:
@@ -64,7 +72,6 @@ def add_resume_to_db(filename, parsed_data, file_bytes):
     conn.close()
 
 def get_all_resumes():
-    """Retrieves all resumes from the database."""
     conn = sqlite3.connect('resume_data.db')
     c = conn.cursor()
     c.execute("SELECT id, filename, name, parsed_json, uploaded_at, saved_filepath FROM resumes ORDER BY uploaded_at DESC")
@@ -72,17 +79,19 @@ def get_all_resumes():
     conn.close()
     return records
 
-# --- Core Logic Functions ---
+def get_text_from_docx(path):
+    doc = docx.Document(path)
+    return '\n'.join([para.text for para in doc.paragraphs])
 
 def extract_text_from_file(uploaded_file):
-   """Extracts text from an uploaded file object (PDF)."""
-   return extract_text(uploaded_file)
+   if uploaded_file.name.endswith('.pdf'):
+        return extract_text(uploaded_file)
+   else:
+       return get_text_from_docx(uploaded_file)
+        
 
 def get_gemini_response(resume_text, api_key):
-    """Sends the resume text to the Gemini API and gets a structured JSON response."""
     genai.configure(api_key=api_key)
-
-    # Updated prompt to include 'personal_info' with 'name' and 'email'
     prompt = textwrap.dedent(f"""
         You are an expert resume parser. Your task is to analyze the provided resume text and extract key information into a structured JSON format.
 
@@ -92,8 +101,6 @@ def get_gemini_response(resume_text, api_key):
         {{
           "personal_info": {{
             "name": "Candidate's Full Name",
-            "email": "Candidate's Email Address",
-            "phone": "Candidate's Phone Number"
           }},
           "Skills": [
             "Skill 1", "Skill 2", ...
@@ -141,7 +148,7 @@ def get_gemini_response(resume_text, api_key):
         --- RESUME TEXT END ---
     """)
 
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-2.0-flash')
     response = model.generate_content(prompt)
     cleaned_json_string = response.text.strip().replace('```json', '').replace('```', '').strip()
     return cleaned_json_string
@@ -156,16 +163,14 @@ def display_parsed_data_in_tables(data):
         st.write(f"**Email:** {info.get('email', 'N/A')}")
         st.write(f"**Phone:** {info.get('phone', 'N/A')}")
 
-    st.subheader("🛠️ Skills")
+    st.subheader("Skills")
     skills = data.get("Skills", [])
     if skills:
-        # Display skills in a more compact way
         st.write(", ".join(skills))
     else:
         st.write("No skills found.")
 
-    # Education
-    st.subheader("🎓 Education")
+    st.subheader("Education")
     education = data.get("Education", [])
     if education:
         df_edu = pd.DataFrame(education)
@@ -173,19 +178,16 @@ def display_parsed_data_in_tables(data):
     else:
         st.write("No education details found.")
 
-    # Work Experience
-    st.subheader("💼 Work Experience")
+    st.subheader("Work Experience")
     experience = data.get("Work Experience", [])
     if experience:
         df_exp = pd.DataFrame(experience)
-        # Make the responsibilities list more readable
         df_exp['responsibilities'] = df_exp['responsibilities'].apply(lambda x: "\n".join(f"- {item}" for item in x) if isinstance(x, list) else x)
         st.dataframe(df_exp, use_container_width=True)
     else:
         st.write("No work experience found.")
 
-    # Projects
-    st.subheader("🚀 Projects")
+    st.subheader("Projects")
     projects = data.get("Projects", [])
     if projects:
         df_proj = pd.DataFrame(projects)
@@ -195,46 +197,44 @@ def display_parsed_data_in_tables(data):
         st.write("No projects found.")
 
 
-# --- Streamlit App ---
-
 def main():
     load_dotenv()
-    st.set_page_config(page_title="AI Resume Parser", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Resume Parser", layout="wide", initial_sidebar_state="expanded")
     init_db()
 
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        st.error("🚨 Google API Key not found! Please set it in your .env file.")
+        st.error("Google API Key not found! Please set it in your .env file.")
         st.stop()
 
-    st.title("📄 AI-Powered Resume Parser")
-    st.write("Upload a resume PDF. The AI will extract key details, display them in tables, and save the record.")
+    st.title("Resume Parser")
+    st.write("Upload a resume (PDF or docx)")
 
-    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+    uploaded_file = st.file_uploader("Choose a PDF or a DOCX file", type=["pdf","docx"])
 
     if uploaded_file is not None:
-        if st.button(f"✨ Parse '{uploaded_file.name}'"):
+        if st.button(f"Parse '{uploaded_file.name}'"):
             with st.spinner('Parsing in progress... This may take a moment.'):
                 try:
                     file_bytes = uploaded_file.getvalue()
                     resume_text = extract_text_from_file(uploaded_file)
                     gemini_output_str = get_gemini_response(resume_text, api_key)
-                    parsed_json = json.loads(gemini_output_str)
 
-                    # Save file and data to DB
+                    parsed_json = json.loads(gemini_output_str)
+                    parsed_json['personal_info']['email']=get_email(resume_text) if get_email(resume_text) else 'NOT FOUND'
+                    parsed_json['personal_info']['phone']=get_phone(resume_text) if get_phone(resume_text) else 'NOT FOUND'
                     add_resume_to_db(uploaded_file.name, parsed_json, file_bytes)
 
-                    st.success("✅ Resume parsed and saved successfully!")
+                    st.success("Resume parsed and saved successfully!")
                     display_parsed_data_in_tables(parsed_json)
 
                 except json.JSONDecodeError:
-                    st.error("❌ Failed to parse the AI's response as JSON. The raw response was:")
+                    st.error("Failed to parse the AI's response as JSON. The raw response was:")
                     st.text(gemini_output_str)
                 except Exception as e:
                     st.error(f"An unexpected error occurred: {e}")
 
-    # --- Sidebar: History of Parsed Resumes ---
-    st.sidebar.title("🗂️ Parsing History")
+    st.sidebar.title("Parsing History")
     history_records = get_all_resumes()
 
     if not history_records:
@@ -248,16 +248,15 @@ def main():
             
             with st.sidebar.expander(f"**{display_name}** `({timestamp.split(' ')[0]})`"):
                 if saved_filepath and os.path.exists(saved_filepath):
-                    with open(saved_filepath, "rb") as pdf_file:
+                    with open(saved_filepath, "rb") as file:
                         st.download_button(
-                            label="Download Original PDF",
-                            data=pdf_file.read(),
-                            file_name=filename, # Use original filename for download
+                            label="Download Original Resume",
+                            data=file.read(),
+                            file_name=filename, 
                             mime="application/octet-stream",
-                            key=f"download_{record_id}" # Unique key
+                            key=f"download_{record_id}" 
                         )
                 
-                # Show the tabular view in the sidebar as well
                 data = json.loads(json_data)
                 display_parsed_data_in_tables(data)
 
