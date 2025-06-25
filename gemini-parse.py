@@ -78,6 +78,30 @@ def get_all_resumes():
     records = c.fetchall()
     conn.close()
     return records
+def get_all_resumes_as_json():
+    conn = sqlite3.connect('resume_data.db')
+    c = conn.cursor()
+    c.execute("SELECT filename, name, email, parsed_json, uploaded_at FROM resumes ORDER BY uploaded_at DESC")
+    records = c.fetchall()
+    conn.close()
+    
+    # Convert to list of dictionaries
+    resume_list = []
+    for record in records:
+        filename, name, email, parsed_json_str, uploaded_at = record
+        try:
+            parsed_data = json.loads(parsed_json_str)
+        except json.JSONDecodeError:
+            parsed_data = {}
+        resume_list.append({
+            "filename": filename,
+            "name": name,
+            "email": email,
+            "uploaded_at": uploaded_at,
+            "parsed_data": parsed_data
+        })
+    return resume_list
+
 
 def get_text_from_docx(path):
     doc = docx.Document(path)
@@ -233,6 +257,18 @@ def main():
                     st.text(gemini_output_str)
                 except Exception as e:
                     st.error(f"An unexpected error occurred: {e}")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Download All Data")
+    all_resumes_data = get_all_resumes_as_json()
+    all_json_bytes = json.dumps(all_resumes_data, indent=2).encode('utf-8')
+
+    st.sidebar.download_button(
+        label="📁 Download All as JSON",
+        data=all_json_bytes,
+        file_name="all_parsed_resumes.json",
+        mime="application/json"
+    )
+
 
     st.sidebar.title("Parsing History")
     history_records = get_all_resumes()
